@@ -1,15 +1,14 @@
-import urllib
 import webapp2
 import cgi
+import cloudstorage
 
-from google.appengine.ext import blobstore
+from google.appengine.api import app_identity
 from google.appengine.ext.webapp import blobstore_handlers
-from google.appengine.api import files
 
 from models import Package
 
-import logging
-class MainHandler(blobstore_handlers.BlobstoreUploadHandler):
+
+class MainHandler(webapp2.RequestHandler):
     def get(self):
         self.response.out.write('<html><body></body></html>')
 
@@ -17,42 +16,44 @@ class MainHandler(blobstore_handlers.BlobstoreUploadHandler):
         name = self.request.get('name', None)
         version = self.request.get('version', None)
         action = self.request.get(':action', None)
-        logging.info(self.request.params)
+
         if action == 'file_upload':
             for key, value in self.request.params.items():
                 if isinstance(value, cgi.FieldStorage):
                     uploaded_file = value
 
-            fname = uploaded_file.filename.strip()
-            file_name = files.blobstore.create(
-                _blobinfo_uploaded_filename=fname)
-            with files.open(file_name, 'a') as f:
-                f.write(uploaded_file.file.read())
-            files.finalize(file_name)
+            fname = "/{bucket}/{filename}".format(
+                bucket=app_identity.get_default_gcs_bucket_name(),
+                filename=uploaded_file.filename.strip())
 
-            blob_key = files.blobstore.get_blob_key(file_name)
+            with cloudstorage.open(fname, 'w') as f:
+                f.write(uploaded_file.file.read())
+            f.close()
             if name is not None and version is not None:
-                pack = Package(name=name, version=version, content=blob_key)
+                pack = Package(name=name,
+                               version=version,
+                               content=uploaded_file.filename.strip())
                 pack.put()
 
 
 class ServeHandler(blobstore_handlers.BlobstoreDownloadHandler):
     def get(self, resource):
-        resource = str(urllib.unquote(resource))
-        blob_info = blobstore.BlobInfo.gql(
-            "WHERE filename='%s' LIMIT 1" % resource)[0]
-        self.send_blob(blob_info, save_as=True)
+        if (len(resource) > 0):
+            self.send_blob('/gs/' + resource)
+        else:
+            self.response.write('no id given')
 
 
 class Listing(webapp2.RequestHandler):
     def get(self):
         self.response.out.write(
             '<html><head><title>eggs</title></head><body><pre>')
-        files = blobstore.BlobInfo.all()
+        files = Package.query()
         for file in files:
             self.response.out.write(
-                '<a href="{filename}">{filename}</a>\n'.format(
-                    filename=file.filename))
+                '<a href="/gs/{bucket}/{filename}">{filename}</a>\n'.format(
+                    bucket=app_identity.get_default_gcs_bucket_name(),
+                    filename=file.content))
         self.response.out.write('</pre></body></html>')
 
 
@@ -60,16 +61,15 @@ class Single(webapp2.RequestHandler):
     def get(self, filename):
         self.response.out.write(
             '<html><head><title>eggs</title></head><body><pre>')
-        blob_info = blobstore.BlobInfo.gql(
-            "WHERE filename > '%s' LIMIT 1" % filename)[0]
         self.response.out.write(
-            '<a href="{filename}">{filename}</a>\n'.format(
-                filename=blob_info.filename))
+            '<a href="/gs/{bucket}/{filename}">{filename}</a>\n'.format(
+                bucket=app_identity.get_default_gcs_bucket_name(),
+                filename=filename))
         self.response.out.write('</pre></body></html>')
 
 
 app = webapp2.WSGIApplication([('/', MainHandler),
                                ('/simple/(.+)', Single),
                                ('/eggs', Listing),
-                               ('/([^/]+)?', ServeHandler)],
+                               ('/gs/(.+)', ServeHandler)],
                               debug=True)
